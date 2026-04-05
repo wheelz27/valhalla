@@ -77,6 +77,21 @@ module Valhalla
       request(:get, "/checkout/sessions/#{session_id}")
     end
 
+    # ── Verify webhook signature ──────────────────────────────────
+    def self.verify_webhook(payload, sig_header, secret)
+      require 'openssl'
+      parts     = sig_header.split(',').map { |p| p.split('=', 2) }.to_h
+      timestamp = parts['t']
+      v1        = parts['v1']
+      raise 'Missing timestamp or signature' unless timestamp && v1
+
+      signed   = "#{timestamp}.#{payload}"
+      expected = OpenSSL::HMAC.hexdigest('SHA256', secret, signed)
+      raise 'Signature mismatch' unless OpenSSL.fixed_length_secure_compare(expected, v1)
+
+      JSON.parse(payload, symbolize_names: true)
+    end
+
     private
 
     def self.flatten_params(hash, prefix = nil)

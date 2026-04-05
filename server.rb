@@ -14,10 +14,11 @@ end
 use Rack::Cors do
   allow do
     origins '*'
-    resource '/leads',    headers: :any, methods: [:get, :post, :options]
-    resource '/checkout', headers: :any, methods: [:post, :options]
-    resource '/session',  headers: :any, methods: [:get, :options]
-    resource '/health',   headers: :any, methods: [:get]
+    resource '/leads',           headers: :any, methods: [:get, :post, :options]
+    resource '/checkout',        headers: :any, methods: [:post, :options]
+    resource '/session',         headers: :any, methods: [:get, :options]
+    resource '/webhook/stripe',  headers: :any, methods: [:post]
+    resource '/health',          headers: :any, methods: [:get]
   end
 end
 
@@ -152,4 +153,57 @@ rescue => e
   $stderr.puts "Session retrieve error: #{e.message}"
   status 500
   json success: false, message: 'Could not retrieve session'
+end
+
+# ── Stripe Webhook ────────────────────────────────────────────
+post '/webhook/stripe' do
+  payload   = request.body.read
+  sig       = request.env['HTTP_STRIPE_SIGNATURE']
+  secret    = ENV['STRIPE_WEBHOOK_SECRET']
+
+  event = if secret && sig
+    begin
+      Valhalla::StripeClient.verify_webhook(payload, sig, secret)
+    rescue => e
+      $stderr.puts "Webhook signature failed: #{e.message}"
+      status 400
+      next json error: 'Invalid signature'
+    end
+  else
+    JSON.parse(payload, symbolize_names: true) rescue {}
+  end
+
+  if event[:type] == 'checkout.session.completed'
+    sess     = event.dig(:data, :object) || {}
+    amount   = (sess[:amount_total].to_i / 100.0).round(2)
+    email    = sess.dig(:customer_details, :email) || 'unknown'
+    name     = sess.dig(:metadata, :client_name) || 'Client'
+    service  = sess.dig(:metadata, :service) || 'service'
+    phone    = sess.dig(:metadata, :client_phone) || ''
+
+    # Log payment
+    log_path = File.join(Valhalla::CONFIG[:data_dir], 'payments.log')
+    File.open(log_path, 'a') do |f|
+      f.puts "[#{Time.now}] PAID $#{amount} — #{name} (#{email}) — #{service}"
+    end
+
+    # Email notification
+    require_relative 'lib/actions/notify_owner'
+    Valhalla::Actions::NotifyOwner.new.call({
+      name:    name,
+      email:   email,
+      phone:   phone,
+      service: service,
+      message: "💳 PAYMENT RECEIVED — $#{amount} USD\nService: #{service}\nClient: #{name}\nEmail: #{email}"
+    })
+
+    $stdout.puts "Payment received: $#{amount} from #{email}"
+  end
+
+  status 200
+  json received: true
+rescue => e
+  $stderr.puts "Webhook error: #{e.message}"
+  status 500
+  json error: 'Webhook processing failed'
 end
