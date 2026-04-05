@@ -1,0 +1,5 @@
+[phases.build]
+cmds = ["bundle install"]
+
+[start]
+cmd = "bundle exec ruby server.rb"
